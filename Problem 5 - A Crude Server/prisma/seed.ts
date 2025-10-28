@@ -1,3 +1,8 @@
+/**
+ * Bui Cong Vinh
+ * Code is done in 28/10/2025
+ */
+
 import { PrismaClient } from "../src/generated/prisma/client.js";
 const prisma = new PrismaClient();
 

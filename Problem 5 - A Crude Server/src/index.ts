@@ -1,3 +1,8 @@
+/**
+ * Bui Cong Vinh
+ * Code is done in 28/10/2025
+ */
+
 import express from "express";
 import dotenv from "dotenv";
 import resourceRoutes from "./routes/resourceRoutes.js";

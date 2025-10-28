@@ -4,8 +4,7 @@
   "description": "Three ways to sum to n",
   "main": "Solution.ts",
   "scripts": {
-    "start": "tsx Solution.ts",
-    "dev": "tsx Solution.ts"
+    "start": "tsx Solution.ts"
   },
   "devDependencies": {
     "tsx": "^4.7.0",

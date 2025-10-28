@@ -267,3 +267,8 @@ Problem 5 - A Crude Server/
 ├── nodemon.json                    # Nodemon configuration
 └── README.md                       # This file
 ```
+
+## Author
+
+Bui Cong Vinh  
+Completed: 28/10/2025
