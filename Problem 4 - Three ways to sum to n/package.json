@@ -1,0 +1,15 @@
+{
+  "name": "three-ways-to-sum",
+  "version": "1.0.0",
+  "description": "Three ways to sum to n",
+  "main": "Solution.ts",
+  "scripts": {
+    "start": "tsx Solution.ts",
+    "dev": "tsx Solution.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0",
+    "@types/node": "^20.10.0"
+  }
+}
