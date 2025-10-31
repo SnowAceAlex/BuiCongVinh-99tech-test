@@ -202,6 +202,8 @@ Problem 4 - Three ways to sum to n/
 └── README.md            # This file
 ```
 
+---
+
 ## Author
 
 Bui Cong Vinh  

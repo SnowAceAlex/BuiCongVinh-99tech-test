@@ -17,7 +17,7 @@ app.use(express.json());
 
 // Routes
 app.get("/", (req, res) => {
-  res.json({ message: "Welcome to the Resource API" });
+  res.json({ message: "Welcome to the Resource API by Bui Cong Vinh" });
 });
 
 app.use("/api/resources", resourceRoutes);

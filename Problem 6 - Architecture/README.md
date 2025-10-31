@@ -308,11 +308,7 @@ sequenceDiagram
 
 ---
 
-## Evaluation Criteria
+## Author
 
-- **Correctness**: System works as specified
-- **Security**: Prevents abuse and unauthorized access
-- **Performance**: Fast responses (< 200ms typical)
-- **Scalability**: Handles many concurrent users
-- **Code Quality**: Clean, maintainable, documented
-- **Testing**: Good test coverage
+Bui Cong Vinh  
+Completed: 28/10/2025
