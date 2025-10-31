@@ -1,112 +1,89 @@
-## API Module Specification: Live Scoreboard Service
+## Live Scoreboard API - Backend Architecture
 
 ### Overview
 
-This module provides backend APIs and realtime streaming for a website leaderboard that displays the top 10 users by score. Users perform an action (details out of scope) and, upon completion, the client dispatches an authenticated request to increment the user’s score. The service must stream live updates to all connected clients, prevent unauthorized/malicious score inflation, and scale under bursty traffic.
+Design a backend API system for a real-time leaderboard that displays the top 10 users by score. When a user completes an action, their score increases and all connected clients should see the update in real-time.
 
-### Goals
+**Requirements:**
 
-- Maintain a global leaderboard showing top N (default 10) scores.
-- Realtime updates to connected clients when scores change.
-- Authoritative, tamper-resistant score increments with auditing and anti-abuse controls.
-- Low latency (<200ms p95) for increment-to-broadcast under normal load.
-
-### Non-Goals
-
-- The details of the client-side action are out of scope.
-- Full user management and authentication provider are assumed to exist upstream.
+- Show top 10 users on leaderboard
+- Update scores in real-time for all users
+- Prevent cheating/unauthorized score changes
+- Handle high traffic efficiently
 
 ---
 
 ## API Flow Diagram
 
-The following diagram illustrates the complete flow for updating a user's score and broadcasting changes to all connected clients:
-
 ![Scoreboard API Flow Diagram](Scoreboard%20API%20Flow%20Diagram.png)
 
 ---
 
-## Architecture
+## System Architecture
 
-- API layer (REST + WebSocket/SSE gateway)
-- Score Service (domain logic, validation, anti-abuse, auditing)
-- Caching/Leaderboard store: Redis Sorted Set (primary for leaderboard queries/broadcasts)
-- OLTP database (PostgreSQL/MySQL) for durable audit log and source-of-truth user scores
-- Pub/Sub (Redis Pub/Sub or message broker) for fan-out to realtime gateway instances
+**Components:**
 
-Recommended pattern:
+- **API Layer**: REST endpoints + WebSocket for real-time updates
+- **Database (PostgreSQL)**: Stores user scores and audit logs
+- **Redis**: Fast leaderboard queries using Sorted Sets
+- **Pub/Sub**: Broadcasts score changes to all connected clients
 
-- Redis ZSET keeps the live leaderboard with O(log N) updates via ZINCRBY.
-- Database keeps an append-only `score_events` audit and an upserted `user_scores` aggregate.
-- On increment: write audit event, update DB aggregate in a transaction, update Redis ZSET, then publish a leaderboard-diff event.
-- Realtime gateway broadcasts the minimal diff to clients; periodic full snapshots ensure consistency.
+**How it works:**
 
----
-
-## Data Model
-
-Tables (RDBMS):
-
-- `users` (id, handle, created_at)
-- `user_scores` (user_id PK/FK, score BIGINT NOT NULL DEFAULT 0, updated_at, version INT)
-- `score_events` (id UUID PK, user_id, delta SMALLINT, action_id UUID, created_at, metadata JSONB)
-- `idempotency_keys` (idempotency_key PK, user_id, created_at, consumed_at)
-
-Redis:
-
-- `leaderboard:zset` — ZSET mapping `user_id -> score`
-- `leaderboard:top10` — cached JSON snapshot (optional)
-- `leaderboard:pub` — Pub/Sub channel for diffs `{ type: "score_update", userId, score }`
-
-Indexes:
-
-- `user_scores(user_id)` unique
-- `score_events(user_id)`; `score_events(action_id)` unique if applicable
-- `idempotency_keys(idempotency_key)` unique
-
-Concurrency & Consistency:
-
-- Use DB row-level locking (`SELECT ... FOR UPDATE`) or optimistic concurrency via `version` on `user_scores` to avoid lost updates.
-- Applying increments is idempotent via an `idempotency_key` supplied by the client; duplicates are dropped.
+1. User completes action → Frontend calls API
+2. Backend verifies authentication
+3. Update score in database
+4. Update Redis leaderboard cache
+5. Broadcast update via WebSocket to all clients
 
 ---
 
-## Security and Anti-Abuse
+## Database Schema
 
-Threats to mitigate:
+**PostgreSQL Tables:**
 
-- Unauthorized users calling the increment API for others
-- Replay or scripted mass increments by the same user
-- Tampering with increment magnitude
+```sql
+-- Users table
+users (id, handle, created_at)
 
-Controls:
+-- Current scores
+user_scores (user_id, score BIGINT, updated_at, version)
 
-- Authentication: OAuth2/JWT Bearer access token; scopes include `scores:write` for increments and `scores:read` for queries.
-- Authorization: user in token must match the incremented user. No admin override via this public API.
-- Increment magnitude: client never sends arbitrary delta; server infers delta=1 (or configured) from a signed Action-Completion Token.
-- Action-Completion Token (ACT): short-lived, single-use JWT minted by the server during/after action validation; claims: `sub` (user_id), `inc` (1), `exp`, `jti`, `purpose: score_increment`. The increment API accepts only this token; server validates signature, expiration, and `jti` single-use via a consume store.
-- Idempotency: client supplies `Idempotency-Key` header (UUID v4). Duplicates within a retention window (e.g., 24h) are no-ops.
-- Rate limiting: token-bucket on `scores:increment` per user and per IP.
-- Anomaly detection: velocity checks (e.g., max 5 increments/min), alerting if exceeded; optionally shadow-disable increments.
-- Transport security: HTTPS/TLS only; HSTS enabled at edge.
+-- Audit log (history of all score changes)
+score_events (id UUID, user_id, delta SMALLINT, action_id, created_at, metadata)
+
+-- Prevent duplicate requests
+idempotency_keys (idempotency_key, user_id, created_at, consumed_at)
+```
+
+Note: `delta` is how much the score changed (e.g., +1, +5, -2). This keeps a complete history.
+
+**Redis:**
+
+- `leaderboard:zset` - Sorted set for fast leaderboard queries (user_id → score)
+- `leaderboard:top10` - Cached JSON of top 10 (optional)
+- `leaderboard:pub` - Pub/Sub channel for broadcasting updates
+
+**Why this design:**
+
+- PostgreSQL = reliable, durable storage (source of truth)
+- Redis = fast reads for leaderboard (sorted sets are O(log N))
+- Separate cache and database = better performance
 
 ---
 
-## API Specification
+## API Endpoints
 
-Base path: `/api`
+Base URL: `/api`  
+Authentication: `Authorization: Bearer <token>`
 
-Authentication: `Authorization: Bearer <access_token>` (standard user auth) unless noted.
+### 1. Get Top Scores
 
-Idempotency: For mutating endpoints, include `Idempotency-Key: <uuid>`.
+```
+GET /api/scores/top?limit=10
+```
 
-### 1) Get Top Scores
-
-- Method/Path: `GET /api/scores/top?limit=10`
-- Auth: optional (public read)
-- Query params:
-  - `limit` (int, 1..100; default 10)
-- Response 200:
+**Response:**
 
 ```json
 {
@@ -118,223 +95,224 @@ Idempotency: For mutating endpoints, include `Idempotency-Key: <uuid>`.
 }
 ```
 
-### 2) Get Current User Score
+### 2. Get My Score
 
-- Method/Path: `GET /api/scores/me`
-- Auth: required
-- Response 200:
-
-```json
-{ "userId": "123", "handle": "alice", "score": 1203, "rank": 9 }
+```
+GET /api/scores/me
 ```
 
-### 3) Request Action-Completion Token (if applicable)
-
-- Method/Path: `POST /api/actions/score-token`
-- Auth: required
-- Body: none (or contextual metadata if needed)
-- Response 200:
+**Response:**
 
 ```json
-{ "actionToken": "<ACT JWT>", "expiresIn": 60 }
+{
+  "userId": "123",
+  "handle": "alice",
+  "score": 1203,
+  "rank": 9
+}
 ```
 
-Notes:
+### 3. Update Score
 
-- This endpoint is used if the action is client-observable but validated server-side. If the action occurs entirely server-side, the ACT may be minted internally and the client only calls increment with that token.
-
-### 4) Increment Score (authoritative)
-
-- Method/Path: `POST /api/scores/increment`
-- Auth: required (access token)
-- Headers:
-  - `Idempotency-Key: <uuid>`
-- Body:
-
-```json
-{ "actionToken": "<ACT JWT>" }
+```
+POST /api/score/update
+Headers: Authorization: Bearer <token>
 ```
 
-- Response 200:
+**Flow:**
+
+1. Verify user is authenticated
+2. Increment score in database
+3. Update Redis cache
+4. Broadcast to all clients via WebSocket
+
+**Response:**
 
 ```json
 {
   "userId": "123",
   "newScore": 1204,
-  "applied": true,
-  "top10Changed": true
+  "success": true
 }
 ```
 
-- Error cases:
-  - 400 invalid/missing body
-  - 401/403 auth failed or token user mismatch
-  - 409 idempotency conflict already processed (return prior result)
-  - 422 invalid/expired/consumed actionToken
-  - 429 rate limit exceeded
+**Errors:**
 
-### 5) Realtime Leaderboard Stream
+- `401` - Not authenticated
+- `429` - Too many requests (rate limited)
+- `500` - Server error
 
-Option A (preferred): WebSocket
+### 4. Real-time Updates (WebSocket)
 
-- Path: `GET /api/ws/leaderboard`
-- Protocol: WS(S). After connect, server pushes events.
-- Messages (server->client):
-
-```json
-{ "type": "snapshot", "top": [ {"userId":"...","handle":"...","score":123}, ... ], "asOf":"..." }
-{ "type": "upsert",  "userId": "123", "score": 1204 }
-{ "type": "remove",  "userId": "999" }
+```
+WS /api/ws/leaderboard
 ```
 
-Clients maintain a local top-10 using upsert/remove diffs.
+**Messages sent to clients:**
 
-Option B: Server-Sent Events (SSE)
+```json
+// Initial snapshot
+{ "type": "snapshot", "top": [ {...}, {...} ] }
 
-- Path: `GET /api/scores/stream`
-- Event types: `snapshot`, `upsert`, `remove`
+// Score updated
+{ "type": "update", "userId": "123", "score": 1204 }
+
+// User fell off leaderboard
+{ "type": "remove", "userId": "999" }
+```
+
+---
+
+## Security & Anti-Abuse
+
+**Threats to prevent:**
+
+1. Users adding fake scores
+2. Bots/scripts spamming increments
+3. One user manipulating others' scores
+
+**Solutions:**
+
+1. **Authentication**: Require valid JWT token
+2. **Authorization**: Users can only update their own score
+3. **Rate Limiting**: Max 10 updates/minute per user
+4. **Idempotency**: Same request ID = same result (prevents duplicates)
+5. **Audit Log**: Keep all score changes in database
+6. **HTTPS**: Encrypt all traffic
 
 ---
 
 ## Execution Flow
 
-### Simple Increment Flow (as shown in diagram above)
+### Simple Flow (Diagram Above)
 
 ```mermaid
 sequenceDiagram
-  autonumber
-  participant C as Client (Browser/App)
-  participant A as API Service
-  participant D as Database (OLTP)
-  participant R as Redis (ZSET + Pub/Sub)
-  participant G as Realtime Gateway (WS/SSE)
+    participant C as Client
+    participant API as Backend API
+    participant DB as PostgreSQL
+    participant Redis
+    participant WS as WebSocket
 
-  C->>A: POST /api/score/update (Bearer Token)
-  A->>A: Verify authentication token
-  alt Invalid Token
-    A-->>C: 401 Unauthorized
-  else Valid Token
-    A->>D: Increment user's score in DB
-    A->>R: Update leaderboard cache (ZSET)
-    A->>R: Publish to leaderboard:pub channel
-    A-->>C: 200 Success
-    R-->>G: WebSocket event to all clients
-    G-->>C: Update live scoreboard view
-  end
-```
+    C->>API: POST /api/score/update
+    API->>API: Check auth token
 
-### Complete Flow (with ACT)
-
-For the full implementation with Action-Completion Token (ACT) security:
-
-```mermaid
-sequenceDiagram
-  autonumber
-  participant C as Client (Browser/App)
-  participant G as Realtime Gateway (WS/SSE)
-  participant A as API Service
-  participant S as Score Service
-  participant R as Redis (ZSET + Pub/Sub)
-  participant D as Database (OLTP)
-
-  C->>G: Connect WS /api/ws/leaderboard
-  G-->>C: snapshot(top10)
-
-  C->>A: POST /api/actions/score-token (Bearer)
-  A->>S: mint ACT for user
-  S->>D: record jti (reserve)
-  S-->>A: actionToken (ACT)
-  A-->>C: { actionToken }
-
-  C->>A: POST /api/scores/increment (Idempotency-Key, ACT)
-  A->>S: validate auth, rate-limit, ACT (sig, exp, jti)
-  S->>D: txn{ insert score_events; upsert user_scores; consume jti }
-  S->>R: ZINCRBY leaderboard:zset
-  S->>R: PUBLISH leaderboard:pub { userId, score }
-  S-->>A: { newScore, top10Changed }
-  A-->>C: 200 { newScore }
-  R-->>G: pubsub message
-  G-->>C: upsert(userId, score)
+    alt Invalid Token
+        API-->>C: 401 Error
+    else Valid Token
+        API->>DB: Update score
+        API->>Redis: Update leaderboard
+        API->>Redis: Publish event
+        API-->>C: 200 Success
+        Redis-->>WS: Broadcast to clients
+        WS-->>C: Live update
+    end
 ```
 
 ---
 
-## Validation and Idempotency
+## Error Handling
 
-Increment application is governed by:
-
-- ACT validation: signature, `purpose`, `exp`, single-use `jti` consumed atomically in the DB transaction.
-- Idempotency: `Idempotency-Key` ties to the `(user_id, endpoint)` and stores the final response payload; on duplicate, return stored response.
-- Rate-limits: per-user and per-IP with distinct buckets; encoded in Redis with sliding window or token bucket.
-
----
-
-## Error Model
-
-Standard error payload:
+**Standard error format:**
 
 ```json
-{ "error": { "code": "ACT_EXPIRED", "message": "Action token expired" } }
+{
+  "error": {
+    "code": "UNAUTHORIZED",
+    "message": "Invalid authentication token"
+  }
+}
 ```
 
-Representative codes: `UNAUTHORIZED`, `FORBIDDEN`, `RATE_LIMITED`, `IDEMPOTENT_REPLAY`, `ACT_INVALID`, `ACT_EXPIRED`, `ACT_CONSUMED`, `VALIDATION_FAILED`, `CONFLICT`, `INTERNAL_ERROR`.
+**Common error codes:**
+
+- `UNAUTHORIZED` - Missing/invalid token
+- `RATE_LIMITED` - Too many requests
+- `VALIDATION_FAILED` - Invalid input
+- `INTERNAL_ERROR` - Server issue
 
 ---
 
-## Observability
+## Testing Strategy
 
-- Structured logging: request id, user id, idempotency key, ACT jti, delta, new score.
-- Metrics: increment latency, ACT validation failures, rate-limit hits, pubsub lag, WS connected clients, broadcast fan-out latency.
-- Tracing: span across API → Score Service → DB/Redis.
+**Unit Tests:**
 
----
+- Score calculation logic
+- Authentication validation
+- Rate limiting logic
 
-## Deployment & Scalability
+**Integration Tests:**
 
-- Stateless API instances; sticky sessions not required.
-- Redis cluster for ZSET and rate limiting; enable keyspace notifications for auxiliary invalidations if used.
-- DB with primary/replica; write only to primary. Consider partitioning `score_events` by time.
-- Horizontal scale of realtime gateway; subscribe all to `leaderboard:pub`.
-- Cold start recovery: rebuild Redis ZSET from `user_scores` on boot or scheduled reconciliation job.
+- Full flow: API → Database → Redis → WebSocket
+- Concurrent score updates
+- WebSocket connection/disconnection
 
----
+**Load Tests:**
 
-## Test Strategy
-
-- Unit: ACT validation, idempotency behavior, rank calculation, diff generation.
-- Integration: increment transactionality (events + aggregates), Redis ZINCRBY, Pub/Sub to WS.
-- Security: replay ACT, expired ACT, user mismatch, flood increments under rate limits.
-- Load: simulate bursts of increments and connected WS clients; validate p95 latency.
+- 1000+ simultaneous users
+- High-frequency score updates
+- WebSocket connections
 
 ---
 
-## Backward/Edge Cases
+## Edge Cases
 
-- New users with zero scores: appear after first increment or when explicitly included.
-- Ties in score: break by earliest `updated_at` ascending, then `user_id`.
-- Negative increments: not supported via public API.
-- Account deletion: remove from ZSET and mask in snapshots; keep `score_events` for audit or purge by policy.
+**What to consider:**
 
----
-
-## Additional Improvement Suggestions
-
-- Bot mitigation: add proof-of-work or device attestation for `scores:increment` in high-risk environments.
-- Abuse heuristics: per-device and per-ASN velocity caps; temporary cool-downs.
-- Regional shards: per-region ZSETs with periodic merge for global leaderboard.
-- Snapshot compression: delta-compressed streams for large leaderboards beyond top-10.
-- GDPR/Privacy: minimize PII; expose `handle` only if user opted-in to public leaderboard.
-- Feature flags: dynamically switch between WS and SSE; adjustable increment value.
+- New users (start at 0)
+- Tied scores (break by time, then ID)
+- Database connection fails (handle gracefully)
+- Redis down (fallback to database)
+- WebSocket disconnect (reconnect with latest data)
+- User deletes account (remove from leaderboard)
 
 ---
 
-## Implementation Checklist (for the engineering team)
+## Implementation Checklist
 
-- [ ] Define JWT issuer and keys for ACT; implement mint and consume flows
-- [ ] Implement `POST /api/scores/increment` with idempotency, rate limiting, ACT validation
-- [ ] Implement Redis ZSET updates and Pub/Sub publish
-- [ ] Implement WS `/api/ws/leaderboard` gateway with snapshot + diff
-- [ ] Implement `GET /api/scores/top` and `GET /api/scores/me`
-- [ ] Implement reconciliation job between DB `user_scores` and Redis ZSET
-- [ ] Add metrics, logs, tracing, and dashboards
-- [ ] Add load tests and security tests
+**Phase 1 - Core Features**
+
+- [ ] Database schema and migrations
+- [ ] Get top scores endpoint
+- [ ] Update score endpoint
+- [ ] Basic authentication
+
+**Phase 2 - Real-time**
+
+- [ ] WebSocket connection
+- [ ] Broadcast score updates
+- [ ] Handle client reconnection
+
+**Phase 3 - Security**
+
+- [ ] Rate limiting
+- [ ] Idempotency handling
+- [ ] Audit logging
+
+**Phase 4 - Performance**
+
+- [ ] Redis caching
+- [ ] Database indexes
+- [ ] Load testing
+
+---
+
+## Key Technologies
+
+- **Backend**: Node.js/Express, Python/FastAPI, or Go (your choice)
+- **Database**: PostgreSQL
+- **Cache**: Redis
+- **Real-time**: WebSockets (Socket.io or native)
+- **Authentication**: JWT tokens
+- **Monitoring**: Logs, metrics, error tracking
+
+---
+
+## Evaluation Criteria
+
+- **Correctness**: System works as specified
+- **Security**: Prevents abuse and unauthorized access
+- **Performance**: Fast responses (< 200ms typical)
+- **Scalability**: Handles many concurrent users
+- **Code Quality**: Clean, maintainable, documented
+- **Testing**: Good test coverage
