@@ -18,6 +18,14 @@ This module provides backend APIs and realtime streaming for a website leaderboa
 
 ---
 
+## API Flow Diagram
+
+The following diagram illustrates the complete flow for updating a user's score and broadcasting changes to all connected clients:
+
+![Scoreboard API Flow Diagram](Scoreboard%20API%20Flow%20Diagram.png)
+
+---
+
 ## Architecture
 
 - API layer (REST + WebSocket/SSE gateway)
@@ -189,6 +197,35 @@ Option B: Server-Sent Events (SSE)
 ---
 
 ## Execution Flow
+
+### Simple Increment Flow (as shown in diagram above)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as Client (Browser/App)
+  participant A as API Service
+  participant D as Database (OLTP)
+  participant R as Redis (ZSET + Pub/Sub)
+  participant G as Realtime Gateway (WS/SSE)
+
+  C->>A: POST /api/score/update (Bearer Token)
+  A->>A: Verify authentication token
+  alt Invalid Token
+    A-->>C: 401 Unauthorized
+  else Valid Token
+    A->>D: Increment user's score in DB
+    A->>R: Update leaderboard cache (ZSET)
+    A->>R: Publish to leaderboard:pub channel
+    A-->>C: 200 Success
+    R-->>G: WebSocket event to all clients
+    G-->>C: Update live scoreboard view
+  end
+```
+
+### Complete Flow (with ACT)
+
+For the full implementation with Action-Completion Token (ACT) security:
 
 ```mermaid
 sequenceDiagram
